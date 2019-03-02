@@ -1388,37 +1388,40 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
         defined in MINI_MASK_SHAPE.
         
     """
-    def resize_bbox(bbx, scale, padding, crop):
-            
-        bbx = [i*scale for i in bbx]
-        bbx[0]+= padding[1][0]
-        bbx[2]+= padding[1][0]
-        bbx[1]+= padding[0][0]
-        bbx[3]+= padding[0][0]
-        bbx = [int(i) for i in bbx]
-        
-        bbx1 = [bbx[1], bbx[0], bbx[3], bbx[2]]
-        
-        return bbx1
+    
+    def resize_bbox(bboxes, scale, padding, crop):
+        bboxes_ = []
+        for bbox in bboxes:
+            bbox = [i*scale for i in bbox]
+            bbox[0]+= padding[1][0]
+            bbox[2]+= padding[1][0]
+            bbox[1]+= padding[0][0]
+            bbox[3]+= padding[0][0]
+            bbox = [int(i) for i in bbox]
+            bboxes_.append([bbox[1], bbox[0], bbox[3], bbox[2]])
+
+        return bboxes_
+    
+    debug = False
+    debug_root = '/home/aaron/mydisk/tianchi/secu_detect/train/faster_rcnn/debug_doc'
     # Load image and mask
     image = dataset.load_image_from_path(image_id)
-
-        
-        
-    bbox_ori, class_id = dataset.load_bbox(image_id)
-    if 'debug1' == 'debug' and  image_id == 0:
+    
+    bboxes_ori, category_ids = dataset.load_bboxes(image_id)
+    if debug and image_id in list(range(20)):
         print('train img: ', dataset.load_image_path(image_id))
         print('train imgshape: ', image.shape)
-        print('bbox = {}, {}, {}, {}', bbox_ori)
+        print('bbox = {}, {}, {}, {}', bboxes_ori)
 #        print('bbox = {}, {}, {}, {}'.format(i for i in bbox_ori[0] ))
         dbg_img = copy.deepcopy(image)
         dbg_img = Image.fromarray(dbg_img.astype(np.uint8))
 #        print('train imgshape: ', dbg_img.shape)
         drawer = ImageDraw.Draw(dbg_img)
-        drawer.line(((bbox_ori[0], bbox_ori[1]),(bbox_ori[2], bbox_ori[1])), fill = 128)
-        drawer.line(((bbox_ori[0], bbox_ori[1]),(bbox_ori[0], bbox_ori[3])), fill = 128)
-        drawer.line(((bbox_ori[2], bbox_ori[1]),(bbox_ori[2], bbox_ori[3])), fill = 128)
-        drawer.line(((bbox_ori[0], bbox_ori[3]),(bbox_ori[2], bbox_ori[3])), fill = 128)
+        for bbox_ori in bboxes_ori:
+            drawer.line(((bbox_ori[0], bbox_ori[1]),(bbox_ori[2], bbox_ori[1])), fill = 128)
+            drawer.line(((bbox_ori[0], bbox_ori[1]),(bbox_ori[0], bbox_ori[3])), fill = 128)
+            drawer.line(((bbox_ori[2], bbox_ori[1]),(bbox_ori[2], bbox_ori[3])), fill = 128)
+            drawer.line(((bbox_ori[0], bbox_ori[3]),(bbox_ori[2], bbox_ori[3])), fill = 128)
         dbg_img.show()
         del drawer
         
@@ -1431,17 +1434,19 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
         min_scale=config.IMAGE_MIN_SCALE,
         max_dim=config.IMAGE_MAX_DIM,
         mode=config.IMAGE_RESIZE_MODE)
-    bbox_resize = resize_bbox(bbox_ori, scale, padding, crop)
+    bboxes_resize1 = resize_bbox(bboxes_ori, scale, padding, crop)
     
     
     
     
     
-    bbox = np.array([bbox_resize]).astype(np.int32)
-    
-    class_id1 = dataset.map_source_class_id( "clothes.{}".format(class_id))
-#    print('--class_id', class_id, '--class_id1', class_id1)
-    class_ids = np.array([class_id1]).astype(np.int32)
+    bboxes = np.array(bboxes_resize1).astype(np.int32)
+    category_ids1 = []
+    for category_id in category_ids:
+        category_ids1.append(dataset.map_source_class_id( dataset.config.NAME+".{}".format(category_id)))
+    if debug:
+        print('--category_ids', category_ids, '--category_ids1', category_ids1)
+    category_ids = np.array(category_ids1).astype(np.int32)
     # Active classes
     # Different datasets have different classes, so track the
     # classes supported in the dataset of this image.
@@ -1451,34 +1456,33 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
 #    print('source_class_ids', source_class_ids)
     active_class_ids[source_class_ids] = 1
     if sum(active_class_ids[2:5]) ==0:
-        print('--class_ids', class_ids)
-        print("active_class_ids", active_class_ids)
+        print('--category_ids', category_ids)
+        print("active_category_ids", active_class_ids)
     # Image meta data
     image_meta = compose_image_meta(image_id, original_shape, image.shape,
                                     window, int(scale), active_class_ids)
 #    print('-----image_meta', image_meta)
-    if 'debug1' == 'debug':
+    if debug:
         
 
         print('train img: ', dataset.load_image_path(image_id))
         print('train imgshape: ', image.shape)
-        print('bbox = {}, {}, {}, {}', bbox)
 #        print('bbox = {}, {}, {}, {}'.format(i for i in bbox[0] ))
         dbg_img = copy.deepcopy(image)
         dbg_img = Image.fromarray(dbg_img.astype(np.uint8))
 #        print('train imgshape: ', dbg_img.shape)
         drawer = ImageDraw.Draw(dbg_img)
-        
-        drawer.line(((bbox_resize[0], bbox_resize[1]),(bbox_resize[2], bbox_resize[1])), fill = 128)
-        drawer.line(((bbox_resize[0], bbox_resize[1]),(bbox_resize[0], bbox_resize[3])), fill = 128)
-        drawer.line(((bbox_resize[2], bbox_resize[1]),(bbox_resize[2], bbox_resize[3])), fill = 128)
-        drawer.line(((bbox_resize[0], bbox_resize[3]),(bbox_resize[2], bbox_resize[3])), fill = 128)
-        drawer.text((bbox_resize[0], bbox_resize[1]), 'cls_id='+str(class_id), fill = 128)
+        for idx, bbox_resize in enumerate(bboxes_resize1):
+            drawer.line(((bbox_resize[1], bbox_resize[0]),(bbox_resize[3], bbox_resize[0])), fill = 128)
+            drawer.line(((bbox_resize[1], bbox_resize[0]),(bbox_resize[1], bbox_resize[2])), fill = 128)
+            drawer.line(((bbox_resize[3], bbox_resize[0]),(bbox_resize[3], bbox_resize[2])), fill = 128)
+            drawer.line(((bbox_resize[1], bbox_resize[2]),(bbox_resize[3], bbox_resize[2])), fill = 128)
+            drawer.text((bbox_resize[1], bbox_resize[0]), 'cls_id='+str(category_ids1[idx]), fill = 128)
         dbg_img.show()
         del drawer
 #    print("len(image_meta)", len(active_class_ids))
 #    print("class_ids", class_ids)
-    return image, image_meta, class_ids, bbox
+    return image, image_meta, category_ids, bboxes
 
 
 def load_image_gt_bk(dataset, config, image_id, augment=False, augmentation=None,
@@ -2308,8 +2312,8 @@ class MaskRCNN():
             output_rois = KL.Lambda(lambda x: x * 1, name="output_rois")(rois)
 #            rmac_loss = rmac_loss_graph(config, rmac_norm)
             # Losses
-            rmac_loss = KL.Lambda(lambda x: rmac_loss_graph(config, x), name='rmac_loss')(
-                rmac_norm)
+#            rmac_loss = KL.Lambda(lambda x: rmac_loss_graph(config, x), name='rmac_loss')(
+#                rmac_norm)
             rpn_class_loss = KL.Lambda(lambda x: rpn_class_loss_graph(*x), name="rpn_class_loss")(
                 [input_rpn_match, rpn_class_logits])
             rpn_bbox_loss = KL.Lambda(lambda x: rpn_bbox_loss_graph(config, *x), name="rpn_bbox_loss")(
@@ -2333,7 +2337,7 @@ class MaskRCNN():
             outputs = [rpn_class_logits, rpn_class, rpn_bbox,
                        mrcnn_class_logits, mrcnn_class, mrcnn_bbox,
                        rpn_rois, output_rois,
-                       rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, rmac_loss]           
+                       rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss]           
             
             model = KM.Model(inputs, outputs, name='mask_rcnn')
             
@@ -2512,7 +2516,7 @@ class MaskRCNN():
         self.keras_model._per_input_losses = {}
         loss_names = [
             "rpn_class_loss",  "rpn_bbox_loss",
-            "mrcnn_class_loss", "mrcnn_bbox_loss", "rmac_loss"]
+            "mrcnn_class_loss", "mrcnn_bbox_loss"]
         for name in loss_names:
             layer = self.keras_model.get_layer(name)
             if layer.output in self.keras_model.losses:

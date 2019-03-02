@@ -143,7 +143,7 @@ class ClothDataset(utils.Dataset):
             
             if 'need_check_per_image1' == 'need_check_per_image':
                 try:
-                    img = image.load_img(os.path.join(image_dir, annotation.image_name))
+                    img = image.load_img(img_full_path)
                 except FileNotFoundError as e:
 #                    print(annotation.image_name)
                     f.writelines(str(index) + ' : ' + annotation.image_name + '\n')
@@ -161,24 +161,25 @@ class ClothDataset(utils.Dataset):
                 continue
                 
             self.add_image(
-                    "clothes",
+                    config.NAME,
                     image_id=image_id,
                     path=img_full_path,
                     width=annotation.width,
                     height=annotation.height,
-                    class_id = annotation.category_label,
-                    bbx = bbx_
+                    class_id = [annotation.category_label],
+                    bbx = [bbx_]
                 )
             step=2000
             if counter % step == 0:
                 rest_time = (time.time()-time0)*((len(annotations)-counter)/(step))
-                print('Adding the image:', counter, 'rest time(sec) = ', rest_time)
+                print('----Adding the image:', counter, 
+                      'rest time(sec) = ', rest_time)
                 time0 = time.time()
 #            if counter >1000:
 #                break
         
         f.close()
-        print('load img end, total num :', counter)
+        print('-----------loaded total image ----------------:', counter)
         
         
 #        for idx, i in enumerate(image_ids):
