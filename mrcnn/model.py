@@ -26,6 +26,8 @@ from PIL import Image, ImageDraw
 #from matplotlib import Dr
 import copy
 from mrcnn import utils
+import imgaug as ia
+#import matplotlib.pyplot as plt
 
 # Requires TensorFlow 1.3+ and Keras 2.0.8+.
 from distutils.version import LooseVersion
@@ -266,6 +268,7 @@ class ProposalLayer(KE.Layer):
         anchors: [batch, num_anchors, (y1, x1, y2, x2)] anchors in normalized coordinates
 
     Returns:
+        only fg objs
         Proposals in normalized coordinates [batch, rois, (y1, x1, y2, x2)]
     """
 
@@ -283,7 +286,8 @@ class ProposalLayer(KE.Layer):
         deltas = deltas * np.reshape(self.config.RPN_BBOX_STD_DEV, [1, 1, 4])
         # Anchors
         anchors = inputs[2]
-
+        
+        #TODO why top_k there must be some rois for bg whem bg prob is large
         # Improve performance by trimming to top anchors by score
         # and doing the rest on the smaller subset.
         pre_nms_limit = tf.minimum(self.config.PRE_NMS_LIMIT, tf.shape(anchors)[1])
@@ -506,19 +510,25 @@ def detection_targets_graph(proposals, gt_class_ids, gt_boxes, config):
 
     Note: Returned arrays might be zero padded if not enough target ROIs.
     """
-    # Assertions
-    asserts = [
-        tf.Assert(tf.greater(tf.shape(proposals)[0], 0), [proposals],
-                  name="roi_assertion"),
-    ]
-    with tf.control_dependencies(asserts):
-        proposals = tf.identity(proposals)
-
-    # Remove zero padding
-    proposals, _ = trim_zeros_graph(proposals, name="trim_proposals")
+    
     gt_boxes, non_zeros = trim_zeros_graph(gt_boxes, name="trim_gt_boxes")
     gt_class_ids = tf.boolean_mask(gt_class_ids, non_zeros,
                                    name="trim_gt_class_ids")
+#    print('gt_boxes.shape()', gt_boxes.shape)
+    # Assertions
+    asserts = [
+        tf.Assert(tf.greater(tf.shape(proposals)[0], 0), [proposals],   #TODO
+                  name="roi_assertion"),
+        tf.Assert(tf.greater(tf.shape(gt_boxes)[0], 0), [gt_boxes], name="gtboxes_num_assertion"),
+    ]
+    with tf.control_dependencies(asserts):
+        proposals = tf.identity(proposals)
+        print('gt_boxes.shape()', gt_boxes.shape)
+
+    # Remove zero padding
+    proposals, _ = trim_zeros_graph(proposals, name="trim_proposals")
+   
+    
 #    gt_masks = tf.gather(gt_masks, tf.where(non_zeros)[:, 0], axis=2,
 #                         name="trim_gt_masks")
 
@@ -700,10 +710,10 @@ def refine_detections_graph(rois, probs, deltas, window, config):
     # Class IDs per ROI
     class_ids = tf.argmax(probs, axis=1, output_type=tf.int32)
     # Class probability of the top class of each ROI
-    indices = tf.stack([tf.range(probs.shape[0]), class_ids], axis=1)
-    class_scores = tf.gather_nd(probs, indices)
+    indices = tf.stack([tf.range(probs.shape[0]), class_ids], axis=1)   #[N,(i, classid)]
+    class_scores = tf.gather_nd(probs, indices)  #[N]
     # Class-specific bounding box deltas
-    deltas_specific = tf.gather_nd(deltas, indices)
+    deltas_specific = tf.gather_nd(deltas, indices) #[N,  (dy, dx, log(dh), log(dw))]
     # Apply bounding box deltas
     # Shape: [boxes, (y1, x1, y2, x2)] in normalized coordinates
     refined_rois = apply_box_deltas_graph(
@@ -714,7 +724,8 @@ def refine_detections_graph(rois, probs, deltas, window, config):
     # TODO: Filter out boxes with zero area
 
     # Filter out background boxes
-    keep = tf.where(class_ids > 0)[:, 0]
+#    keep = tf.where(class_ids > 0)[:, 0]    #[n]  [0,2,5,7]
+    keep = tf.where(class_ids > 0)[:, 0]    #[n]  [0,2,5,7]
     # Filter out low confidence boxes
     if config.DETECTION_MIN_CONFIDENCE:
         conf_keep = tf.where(class_scores >= config.DETECTION_MIN_CONFIDENCE)[:, 0]
@@ -748,10 +759,33 @@ def refine_detections_graph(rois, probs, deltas, window, config):
         # Set shape so map_fn() can infer result shape
         class_keep.set_shape([config.DETECTION_MAX_INSTANCES])
         return class_keep
-
-    # 2. Map over class IDs
-    nms_keep = tf.map_fn(nms_keep_map, unique_pre_nms_class_ids,
+    def nms_keep_map_diff_cls(pre_nms_rois, pre_nms_scores, keep):
+        """Apply Non-Maximum Suppression on ROIs of the given class."""
+        # Indices of ROIs of the given class
+        # Apply NMS
+        class_keep = tf.image.non_max_suppression(
+                pre_nms_rois,
+                pre_nms_scores,
+                max_output_size=config.DETECTION_MAX_INSTANCES,
+                iou_threshold=config.DETECTION_NMS_THRESHOLD)
+        # Map indices
+        class_keep = tf.gather(keep, class_keep)
+        # Pad with -1 so returned tensors have the same shape
+        gap = config.DETECTION_MAX_INSTANCES - tf.shape(class_keep)[0]
+        class_keep = tf.pad(class_keep, [(0, gap)],
+                            mode='CONSTANT', constant_values=-1)
+        # Set shape so map_fn() can infer result shape
+        class_keep.set_shape([config.DETECTION_MAX_INSTANCES])
+#        tf.transpose(class_keep)
+        return class_keep
+    # 2. Map over class IDs#    
+    if config.DETECTION_NMS_DIFF_CLS:
+        nms_keep = nms_keep_map_diff_cls(pre_nms_rois, pre_nms_scores, keep)    #TODO
+    else:
+        nms_keep = tf.map_fn(nms_keep_map, unique_pre_nms_class_ids,
                          dtype=tf.int64)
+    
+#    nms_keep = keep
     # 3. Merge results into one list, and remove -1 padding
     nms_keep = tf.reshape(nms_keep, [-1])
     nms_keep = tf.gather(nms_keep, tf.where(nms_keep > -1)[:, 0])
@@ -773,6 +807,77 @@ def refine_detections_graph(rois, probs, deltas, window, config):
         tf.to_float(tf.gather(class_ids, keep))[..., tf.newaxis],
         tf.gather(class_scores, keep)[..., tf.newaxis]
         ], axis=1)
+
+    # Pad with zeros if detections < DETECTION_MAX_INSTANCES
+    gap = config.DETECTION_MAX_INSTANCES - tf.shape(detections)[0]
+    detections = tf.pad(detections, [(0, gap), (0, 0)], "CONSTANT")
+    return detections
+
+def refine_detections_graph_bk(rois, probs, deltas, window, config):
+    """Refine classified proposals and filter overlaps and return final
+    detections.
+
+    Inputs:
+        rois: [N, (y1, x1, y2, x2)] in normalized coordinates
+        probs: [N, num_classes]. Class probabilities.
+        deltas: [N, num_classes, (dy, dx, log(dh), log(dw))]. Class-specific
+                bounding box deltas.
+        window: (y1, x1, y2, x2) in normalized coordinates. The part of the image
+            that contains the image excluding the padding.
+
+    Returns detections shaped: [num_detections, (y1, x1, y2, x2, class_id, score)] where
+        coordinates are normalized.
+    """
+    # Class IDs per ROI
+    class_ids = tf.argmax(probs, axis=1, output_type=tf.int32)
+    # Class probability of the top class of each ROI
+    indices = tf.stack([tf.range(probs.shape[0]), class_ids], axis=1)   #[N,(i, classid)]
+    class_scores = tf.gather_nd(probs, indices)  #[N]
+    # Class-specific bounding box deltas
+    deltas_specific = tf.gather_nd(deltas, indices) #[N,  (dy, dx, log(dh), log(dw))]
+    # Apply bounding box deltas
+    # Shape: [boxes, (y1, x1, y2, x2)] in normalized coordinates
+    refined_rois = apply_box_deltas_graph(
+        rois, deltas_specific * config.BBOX_STD_DEV)
+    # Clip boxes to image window
+    refined_rois = clip_boxes_graph(refined_rois, window)
+
+    # TODO: Filter out boxes with zero area
+
+    # Filter out background boxes
+#    keep = tf.where(class_ids > 0)[:, 0]    #[n]  [0,2,5,7]
+    keep_fg = tf.where(class_ids > 0)[:, 0]    #[n]  [0,2,5,7]
+    fg_scores = tf.gather(class_scores, keep_fg)
+    fg_rois = tf.gather(refined_rois,   keep_fg)
+    fg_class_ids = tf.gather(class_ids, keep_fg)
+# Filter out low confidence boxes
+    keep_conf = tf.where(fg_scores >= 0.99)[:, 0]
+    conf_scores = tf.gather(fg_scores, keep_conf)
+    conf_rois = tf.gather(fg_rois,   keep_conf)
+    conf_class_ids = tf.gather(fg_class_ids, keep_conf)
+#    detections = tf.concat([
+#        tf.gather(fg_rois, keep_conf),
+#        tf.to_float(tf.gather(fg_class_ids, keep_conf))[..., tf.newaxis],
+#        tf.gather(fg_scores, keep_conf)[..., tf.newaxis]
+#        ], axis=1)
+
+    """Apply Non-Maximum Suppression on ROIs of the given class."""
+    # Indices of ROIs of the given class
+    # Apply NMS
+    keep_nms = tf.image.non_max_suppression(
+            conf_rois,
+            conf_scores,
+            max_output_size=config.DETECTION_MAX_INSTANCES,
+            iou_threshold=0.5)
+
+    detections = tf.concat([
+        tf.gather(conf_rois, keep_nms),
+        tf.to_float(tf.gather(conf_class_ids, keep_nms))[..., tf.newaxis],
+        tf.gather(conf_scores, keep_nms)[..., tf.newaxis]
+        ], axis=1)
+    # Arrange output as [N, (y1, x1, y2, x2, class_id, score)]
+    # Coordinates are normalized.
+
 
     # Pad with zeros if detections < DETECTION_MAX_INSTANCES
     gap = config.DETECTION_MAX_INSTANCES - tf.shape(detections)[0]
@@ -1390,42 +1495,76 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
     """
     
     def resize_bbox(bboxes, scale, padding, crop):
+        '''
+        bboxes [N, (x1,y1,x2,y2 )]
+        '''
+        
         bboxes_ = []
         for bbox in bboxes:
             bbox = [i*scale for i in bbox]
-            bbox[0]+= padding[1][0]
-            bbox[2]+= padding[1][0]
-            bbox[1]+= padding[0][0]
-            bbox[3]+= padding[0][0]
+            bbox[0]+= padding[0][0]
+            bbox[2]+= padding[0][0]
+            bbox[1]+= padding[1][0]
+            bbox[3]+= padding[1][0]
             bbox = [int(i) for i in bbox]
-            bboxes_.append([bbox[1], bbox[0], bbox[3], bbox[2]])
+            
+            bboxes_.append([bbox[0], bbox[1], bbox[2], bbox[3]])#[N, (y1, x1, y2, x2)]
 
         return bboxes_
     
-    debug = False
-    debug_root = '/home/aaron/mydisk/tianchi/secu_detect/train/faster_rcnn/debug_doc'
-    # Load image and mask
-    image = dataset.load_image_from_path(image_id)
-    
-    bboxes_ori, category_ids = dataset.load_bboxes(image_id)
-    if debug and image_id in list(range(20)):
-        print('train img: ', dataset.load_image_path(image_id))
-        print('train imgshape: ', image.shape)
-        print('bbox = {}, {}, {}, {}', bboxes_ori)
-#        print('bbox = {}, {}, {}, {}'.format(i for i in bbox_ori[0] ))
+    def debug_show(img, bboxes):
         dbg_img = copy.deepcopy(image)
         dbg_img = Image.fromarray(dbg_img.astype(np.uint8))
 #        print('train imgshape: ', dbg_img.shape)
         drawer = ImageDraw.Draw(dbg_img)
-        for bbox_ori in bboxes_ori:
-            drawer.line(((bbox_ori[0], bbox_ori[1]),(bbox_ori[2], bbox_ori[1])), fill = 128)
-            drawer.line(((bbox_ori[0], bbox_ori[1]),(bbox_ori[0], bbox_ori[3])), fill = 128)
-            drawer.line(((bbox_ori[2], bbox_ori[1]),(bbox_ori[2], bbox_ori[3])), fill = 128)
-            drawer.line(((bbox_ori[0], bbox_ori[3]),(bbox_ori[2], bbox_ori[3])), fill = 128)
-        dbg_img.show()
-        del drawer
+        for idx, bbox_resize in enumerate(bboxes):
+            drawer.line(((bbox_resize[1], bbox_resize[0]),(bbox_resize[3], bbox_resize[0])), fill = 128)
+            drawer.line(((bbox_resize[1], bbox_resize[0]),(bbox_resize[1], bbox_resize[2])), fill = 128)
+            drawer.line(((bbox_resize[3], bbox_resize[0]),(bbox_resize[3], bbox_resize[2])), fill = 128)
+            drawer.line(((bbox_resize[1], bbox_resize[2]),(bbox_resize[3], bbox_resize[2])), fill = 128)
+            drawer.text((bbox_resize[1], bbox_resize[0]), 'cls_id='+str(category_ids[idx]), fill = 128)
+#        dbg_img.show()
         
+        del drawer
+        return dbg_img
     
+    
+    debug = False
+    debug_root = 'data_generate_debug_fold'
+    if not os.path.exists(debug_root):
+        os.mkdir(debug_root)
+    trainning_save_dir = os.path.join(debug_root, 'train_img')
+    if not os.path.exists(trainning_save_dir):
+        os.mkdir(trainning_save_dir)
+        
+    # Load image and mask
+    image = dataset.load_image_from_path(image_id)
+    
+    bboxes_ori, category_ids = dataset.load_bboxes(image_id)
+    temp = []
+    #adjust to [N, (y1, x1, y2, x2)]
+    for one in bboxes_ori:
+        temp.append([one[1], one[0], one[3], one[2]])
+    bboxes_ori = temp
+    
+    if debug:
+        print('train img: ', dataset.load_image_path(image_id))
+        
+#        print('train imgshape: ', image.shape)
+#        print('bbox = {}, {}, {}, {}', bboxes_ori)
+#        print('bbox = {}, {}, {}, {}'.format(i for i in bbox_ori[0] ))
+        temp_img = debug_show(image, bboxes_ori)
+        temp_i = 0
+        temp_save_path = os.path.join(
+                trainning_save_dir, str(temp_i)+'_0ori.jpg')
+        while os.path.exists(temp_save_path):
+            print("repeat")
+            temp_i += 1
+            temp_save_path = os.path.join(
+                trainning_save_dir, str(temp_i)+'_0ori.jpg')
+        temp_img.save(temp_save_path)
+
+    #%%
     
     original_shape = image.shape
     image, window, scale, padding, crop = utils.resize_image(
@@ -1436,10 +1575,83 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
         mode=config.IMAGE_RESIZE_MODE)
     bboxes_resize1 = resize_bbox(bboxes_ori, scale, padding, crop)
     
+    if debug:
+        print('train img: ', dataset.load_image_path(image_id))
+        print('train imgshape: ', image.shape)
+#        print('bbox = {}, {}, {}, {}'.format(i for i in bbox[0] ))
+        temp_img = debug_show(image, bboxes_resize1)
+        temp_save_path = os.path.join(
+                trainning_save_dir, str(temp_i)+'_1resized.jpg')
+        temp_img.save(temp_save_path)
+
+    #%% Augmentation
+    # This requires the imgaug lib (https://github.com/aleju/imgaug)
+    if augmentation:
+
+#        ia.seed(1)
+        temp_aug_bbox = []
+        for bbox in bboxes_resize1:
+            try:
+                temp_aug_bbox.append(ia.BoundingBox(x1=bbox[1],
+                                                    y1=bbox[0], 
+                                                    x2=bbox[3],
+                                                    y2=bbox[2]))
+            except AssertionError:
+                print('bbox_error :', bbox)
+    
+        bbs = ia.BoundingBoxesOnImage(temp_aug_bbox, shape=image.shape)
+#        if debug: 
+#            pass
+#            plt.figure()
+#            plt.imshow(bbs.draw_on_image(image, thickness=2))
+        
+        
+        seq_det = augmentation.to_deterministic()
+        
+        image = seq_det.augment_image(image)
+        bbs_aug = seq_det.augment_bounding_boxes([bbs])[0]
+#        plt.figure()
+#        plt.imshow(bbs_aug.draw_on_image(image_aug, thickness=2))    
+        
+        bboxes_resize1 = []
+        for one in bbs_aug.bounding_boxes:
+            bboxes_resize1.append([ one.y1, one.x1, one.y2, one.x2])
+        if debug:
+            pass
+            temp_img = debug_show(image, bboxes_resize1)
+            temp_save_path = os.path.join(
+                    trainning_save_dir, str(temp_i)+'_2auged.jpg')
+
+            temp_img.save(temp_save_path)
+#        # Augmenters that are safe to apply to masks
+#        # Some, such as Affine, have settings that make them unsafe, so always
+#        # test your augmentation on masks
+#        MASK_AUGMENTERS = ["Sequential", "SomeOf", "OneOf", "Sometimes",
+#                           "Fliplr", "Flipud", "CropAndPad",
+#                           "Affine", "PiecewiseAffine"]
+#
+#        def hook(images, augmenter, parents, default):
+#            """Determines which augmenters to apply to masks."""
+#            return augmenter.__class__.__name__ in MASK_AUGMENTERS
+#
+#        # Store shapes before augmentation to compare
+#        image_shape = image.shape
+#        mask_shape = mask.shape
+#        # Make augmenters deterministic to apply similarly to images and masks
+#        det = augmentation.to_deterministic()
+#        image = det.augment_image(image)
+#        # Change mask to np.uint8 because imgaug doesn't support np.bool
+#        mask = det.augment_image(mask.astype(np.uint8),
+#                                 hooks=imgaug.HooksImages(activator=hook))
+#        # Verify that shapes didn't change
+#        assert image.shape == image_shape, "Augmentation shouldn't change image size"
+#        assert mask.shape == mask_shape, "Augmentation shouldn't change mask size"
+#        # Change mask back to bool
+#        mask = mask.astype(np.bool)
     
     
     
-    
+    #%% typing
     bboxes = np.array(bboxes_resize1).astype(np.int32)
     category_ids1 = []
     for category_id in category_ids:
@@ -1455,31 +1667,11 @@ def load_image_gt(dataset, config, image_id, augment=False, augmentation=None,
     source_class_ids = dataset.source_class_ids[dataset.image_info[image_id]["source"]]
 #    print('source_class_ids', source_class_ids)
     active_class_ids[source_class_ids] = 1
-    if sum(active_class_ids[2:5]) ==0:
-        print('--category_ids', category_ids)
-        print("active_category_ids", active_class_ids)
     # Image meta data
     image_meta = compose_image_meta(image_id, original_shape, image.shape,
                                     window, int(scale), active_class_ids)
 #    print('-----image_meta', image_meta)
-    if debug:
-        
 
-        print('train img: ', dataset.load_image_path(image_id))
-        print('train imgshape: ', image.shape)
-#        print('bbox = {}, {}, {}, {}'.format(i for i in bbox[0] ))
-        dbg_img = copy.deepcopy(image)
-        dbg_img = Image.fromarray(dbg_img.astype(np.uint8))
-#        print('train imgshape: ', dbg_img.shape)
-        drawer = ImageDraw.Draw(dbg_img)
-        for idx, bbox_resize in enumerate(bboxes_resize1):
-            drawer.line(((bbox_resize[1], bbox_resize[0]),(bbox_resize[3], bbox_resize[0])), fill = 128)
-            drawer.line(((bbox_resize[1], bbox_resize[0]),(bbox_resize[1], bbox_resize[2])), fill = 128)
-            drawer.line(((bbox_resize[3], bbox_resize[0]),(bbox_resize[3], bbox_resize[2])), fill = 128)
-            drawer.line(((bbox_resize[1], bbox_resize[2]),(bbox_resize[3], bbox_resize[2])), fill = 128)
-            drawer.text((bbox_resize[1], bbox_resize[0]), 'cls_id='+str(category_ids1[idx]), fill = 128)
-        dbg_img.show()
-        del drawer
 #    print("len(image_meta)", len(active_class_ids))
 #    print("class_ids", class_ids)
     return image, image_meta, category_ids, bboxes
@@ -1649,12 +1841,12 @@ def build_detection_targets(rpn_rois, gt_class_ids, gt_boxes, gt_masks, config):
     rpn_roi_gt_class_ids = gt_class_ids[rpn_roi_iou_argmax]
 
     # Positive ROIs are those with >= 0.5 IoU with a GT box.
-    fg_ids = np.where(rpn_roi_iou_max > 0.5)[0]
+    fg_ids = np.where(rpn_roi_iou_max > config.rpn_fg_iou_thr)[0]
 
     # Negative ROIs are those with max IoU 0.1-0.5 (hard example mining)
     # TODO: To hard example mine or not to hard example mine, that's the question
     # bg_ids = np.where((rpn_roi_iou_max >= 0.1) & (rpn_roi_iou_max < 0.5))[0]
-    bg_ids = np.where(rpn_roi_iou_max < 0.5)[0]
+    bg_ids = np.where(rpn_roi_iou_max < config.rpn_bg_iou_thr)[0]
 
     # Subsample ROIs. Aim for 33% foreground.
     # FG
@@ -1758,11 +1950,16 @@ def build_rpn_targets(image_shape, anchors, gt_class_ids, gt_boxes, config):
                1 = positive anchor, -1 = negative anchor, 0 = neutral
     rpn_bbox: [N, (dy, dx, log(dh), log(dw))] Anchor bbox deltas.
     """
+    
+    
     # RPN Match: 1 = positive anchor, -1 = negative anchor, 0 = neutral
     rpn_match = np.zeros([anchors.shape[0]], dtype=np.int32)
     # RPN bounding boxes: [max anchors per image, (dy, dx, log(dh), log(dw))]
-    rpn_bbox = np.zeros((config.RPN_TRAIN_ANCHORS_PER_IMAGE, 4))
-
+    rpn_bbox = np.zeros((config.RPN_TRAIN_ANCHORS_PER_IMAGE, 4))      #TODO
+    if gt_class_ids.shape[0] == 0:
+        rpn_match[:] = -1
+        
+        return rpn_match, rpn_bbox
     # Handle COCO crowds
     # A crowd box in COCO is a bounding box around several instances. Exclude
     # them from training. A crowd box is given a negative class ID.
@@ -1799,7 +1996,7 @@ def build_rpn_targets(image_shape, anchors, gt_class_ids, gt_boxes, config):
     rpn_match[(anchor_iou_max < 0.3) & (no_crowd_bool)] = -1
     # 2. Set an anchor for each GT box (regardless of IoU value).
     # TODO: If multiple anchors have the same IoU match all of them
-    gt_iou_argmax = np.argmax(overlaps, axis=0)
+    gt_iou_argmax = np.argmax(overlaps, axis=0)   #TODO
     rpn_match[gt_iou_argmax] = 1
     # 3. Set anchors with high overlap as positive.
     rpn_match[anchor_iou_max >= 0.7] = 1
@@ -2003,7 +2200,7 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
             if dataset.image_info[image_id]['source'] in no_augmentation_sources:
                 image, image_meta, gt_class_ids, gt_boxes = \
                 load_image_gt(dataset, config, image_id, augment=augment,
-                              augmentation=None,
+                              augmentation=augmentation,
                               use_mini_mask=config.USE_MINI_MASK)
             else:
                 image, image_meta, gt_class_ids, gt_boxes = \
@@ -2014,9 +2211,11 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
             # Skip images that have no instances. This can happen in cases
             # where we train on a subset of classes and the image doesn't
             # have any of the classes we care about.
-            if not np.any(gt_class_ids > 0):
+#            if not np.any(gt_class_ids > 0):
+#                if not config.USING_NO_GT_IMG:
+#                    continue
 #                print("data_generator gt_class_ids:", gt_class_ids)
-                continue
+#                continue
 
             # RPN Targets
             rpn_match, rpn_bbox = build_rpn_targets(image.shape, anchors,
@@ -2069,8 +2268,10 @@ def data_generator(dataset, config, shuffle=True, augment=False, augmentation=No
             batch_rpn_match[b] = rpn_match[:, np.newaxis]
             batch_rpn_bbox[b] = rpn_bbox
             batch_images[b] = mold_image(image.astype(np.float32), config)
-            batch_gt_class_ids[b, :gt_class_ids.shape[0]] = gt_class_ids
-            batch_gt_boxes[b, :gt_boxes.shape[0]] = gt_boxes
+            if gt_class_ids.shape[0] > 0:                   #TODO
+                batch_gt_class_ids[b, :gt_class_ids.shape[0]] = gt_class_ids
+                batch_gt_boxes[b, :gt_boxes.shape[0]] = gt_boxes
+                
             if random_rois:
                 batch_rpn_rois[b] = rpn_rois
                 if detection_targets:
@@ -2664,6 +2865,8 @@ class MaskRCNN():
         # Pre-defined layer regular expressions
         layer_regex = {
             # all layers but the backbone
+            "rpn":r"(rpn\_.*)|(fpn\_.*)",
+            "mrcnn":r"(mrcnn\_.*)",
             "heads": r"(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)|(rmac\_.*)",
             # From a specific Resnet stage and up
             "3+": r"(res3.*)|(bn3.*)|(res4.*)|(bn4.*)|(res5.*)|(bn5.*)|(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)|(rmac\_.*)",
