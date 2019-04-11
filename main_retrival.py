@@ -64,6 +64,10 @@ from mrcnn.config import Config
 from mrcnn import model as modellib, utils
 
 # Path to trained weights file
+#
+from tools import check_path
+from mrcnn.utils import compute_ap
+import ThisConfig
 
 # Directory to save logs and model checkpoints, if not provided
 # through the command line argument --logs
@@ -76,85 +80,6 @@ def check_fold(path):
 ############################################################
 
 
-class ClothConfig(Config):
-    """Configuration for training on MS COCO.
-    Derives from the base Config class and overrides values specific
-    to the COCO dataset.
-    """
-    
-        # Parse command line arguments
-    Mode='retrival' #'train' or 'evaluate' or 'retrival'
-    model_version = '0742'
-    subset = 'subset' #mini_subset  subset  
-    # Give the configuration a recognizable name
-    NAME = "clothes"
-    IMAGE_RESIZE_MODE = "square"
-    IMAGE_MIN_DIM = 128
-    IMAGE_MAX_DIM = 128 
-#    IMAGE_MIN_DIM = 128
-#    IMAGE_MAX_DIM = 128 
-    # Image mean (RGB)
-#    MEAN_PIXEL = np.array([123.7, 116.8, 103.9])
-    # We use a GPU with 12GB memory, which can fit two images.
-    # Adjust down if you use a smaller GPU.
-    IMAGES_PER_GPU = 1
-    GPU_COUNT = 1
-    IMAGES_PER_GPU = 1
-    # Uncomment to train on 8 GPUs (default is 1)
-    # GPU_COUNT = 8
-
-    # Number of classes (including background)
-    NUM_CLASSES = 46+1  # clothes has 80 classes  
-#    NUM_CLASSES = 19  # clothes has 80 classes  
-
-    
-    RPN_ANCHOR_SCALES = (8, 16, 32, 64, 128)
-
-    # Image mean (RGB)
-    MEAN_PIXEL = np.array([218.37592,213.07745,211.30586])
-    
-    # Skip detections with < 60% confidence
-    DETECTION_MIN_CONFIDENCE = 0.15
-    # Non-maximum suppression threshold for detection
-    DETECTION_NMS_THRESHOLD = 0.01
-
-
-    DEFAULT_LOGS_DIR = "logs"
-    
-    
-    base = 'clothes' # coco clothes
-
-    if base == 'clothes':
-        MODEL_PATH = 'models/mask_rcnn_clothes_'+model_version+'.h5'
-        NUM_CLASSES = 46+1  # clothes has 80 classes
-#        MODEL_PATH = "/hdisk/Ubuntu/backup/aWS/obj-detection/Mask_RCNN-master/model/18class/mask_rcnn_clothes.h5"
-#        NUM_CLASSES = 18+1  # clothes has 80 classes
-    if base == 'coco':
-        NUM_CLASSES = 1000+1  # clothes has 80 classes
-        MODEL_PATH =  'models/mask_rcnn_coco.h5'
-    
-    computer = 'jz'
-    
-    if computer =='jz':
-        data_root = '/home/aaron/mydisk/datasets/from_zy'
-    elif computer == 'zy':
-        data_root = '/media/mosay/数据/jz/dataset'
-    else:
-        data_root = ''
-    if subset == 'subset':
-        DEFAULT_DATASET = os.path.join(data_root, 'MVC/subset_annotation.txt')
-    if subset == 'mini_subset':
-        DEFAULT_DATASET = os.path.join(data_root, 'MVC/mini_subset_annotation.txt')#    if not os.path.exists(MODEL_PATH):
-#        utils.download_trained_weights(MODEL_PATH)
-    
-
-    
-    limit=100000 
-    rmac_dir='rmac_based_'+base+'_' + model_version
-    check_fold(rmac_dir)
-    
-    BACKBONE = "resnet50"
-    
 
 ############################################################
 #  Dataset
@@ -504,7 +429,7 @@ def save_one_evaluate_result(config, image_id, dataset, result):
         results.append(result)
         """
         [box_results, rmac, feats] = result
-        base_dir = os.path.join(config.rmac_dir, 'feats_db_'+config.subset)
+        base_dir = os.path.join(config.save_base_dir, 'feats_db_'+config.subset)
         check_fold(base_dir)
         
         save_feat_db_path = os.path.join(base_dir, 'feats')
@@ -552,13 +477,14 @@ def save_one_retrival_result(config, image_id, dataset, result, related_num):
         """
         [box_results, rmac, feats, given_feat] = result
         
-        base_dir = os.path.join(config.rmac_dir, 'query_db')
+        base_dir = os.path.join(config.save_base_dir, 'query_db')
         check_fold(base_dir)
         
         save_feat_query_path = os.path.join(base_dir, 'feats')
         check_fold(save_feat_query_path)
         path = dataset.source_image_link(image_id)
-        query_box = dataset.load_given_bbox(image_id)
+        query_box, _ = dataset.load_bboxes(image_id)
+        query_box = query_box[0]
         save_rmac_full_name = os.path.join(save_feat_query_path, 'img_'+str(image_id)+'.pkl')
         pickle.dump([image_id, path, query_box, result, related_num], open(save_rmac_full_name,'wb'))
         
@@ -585,77 +511,7 @@ def save_one_retrival_result(config, image_id, dataset, result, related_num):
         check_fold(save_img_path)
         img.save(os.path.join(save_img_path, path.split('/')[-1]))
 
-
-
-def evaluate_cloth(config, model, dataset, limit=0, image_ids=None):
-    """Runs official COCO evaluation.
-    dataset: A Dataset object with valiadtion data
-    eval_type: "bbox" or "segm" for bounding box or segmentation evaluation
-    limit: if not 0, it's the number of images to use for evaluation
-    """
-
-    # Pick COCO images from the dataset
-    image_ids = image_ids or dataset.image_ids
-
-    # Limit to a subset
-    if limit:
-        image_ids = image_ids[:limit]
-
-    # Get corresponding COCO image IDs.
-    coco_image_ids = [dataset.image_info[id]["id"] for id in image_ids]
-    
-    image = dataset.load_image_from_path(image_ids[0])
-    
-    print('Try predict one image......')
-    r_ = model.detect([image], verbose=0)
-    r_ = r_
-    print('Predicted one image.')
-
-    t_prediction = 0
-    t_start = time.time()
-    t0 = time.time()
-    counter = 0
-    results = []
-    for i, image_id in enumerate(image_ids):
-        counter += 1
-        # Load image
-        image = dataset.load_image_from_path(image_id)
-        #print('Processing image {}'.format(i))
-        # Run detection
-        t = time.time()
-        r = model.detect([image], verbose=0)[0]
-        t_prediction += (time.time() - t)
-
-        # Convert results to COCO format
-        # Cast masks to uint8 because COCO tools errors out on bool
-        for j in range(len(r["class_ids"])):
-            r["class_ids"][j] = 1
-        image_results = build_cloth_evaluate_results(dataset, 
-                                                     [coco_image_ids[i]],
-                                                     r["rois"], 
-                                                       r["class_ids"],
-                                                       r["scores"],
-                                                       r["rmac"],
-                                                       r['feats'])
-        save_one_evaluate_result(config, image_id, dataset, image_results)
-        results.extend(image_results)
-        step = 1000
-        if counter%step == 0:
-            t1 = time.time()
-            rest_time = (t1-t0)*(len(image_ids)-counter)/step
-            print('processing image:{}  rest time(sec)={}'.format(counter, rest_time))
-            t0 = time.time()
-
-    
-
-
-
-    print("Prediction time: {}. Average {}/image".format(
-        t_prediction, t_prediction / len(image_ids)))
-    print("Total time: ", time.time() - t_start)
-
-
-def retrival_cloth(config, model, dataset, limit=0, image_ids=None):
+def evaluate_task(config, model, dataset, image_ids=None):
     """Runs official COCO evaluation.
     dataset: A Dataset object with valiadtion data
     eval_type: "bbox" or "segm" for bounding box or segmentation evaluation
@@ -667,17 +523,16 @@ def retrival_cloth(config, model, dataset, limit=0, image_ids=None):
     image_ids = image_ids or dataset.image_ids
 
     # Limit to a subset
-    if limit:
-        image_ids = image_ids[:limit]
+    image_ids = image_ids[:config.EVA_LIMIT]
 
     # Get corresponding COCO image IDs.
     coco_image_ids = [dataset.image_info[id]["id"] for id in image_ids]
     
     
     image = dataset.load_image_from_path(image_ids[0])
-    bbox, _ = dataset.load_bbox(image_ids[0])
+    bbox, _ = dataset.load_bboxes(image_ids[0])
     print('Try predict one image......')
-    r_ = model.detect([image], verbose=0, given_rois = [[bbox]])
+    r_ = model.detect([image], verbose=0, given_rois = [bbox])
     r_ = r_
     print('Predicted one image.')
 
@@ -691,12 +546,12 @@ def retrival_cloth(config, model, dataset, limit=0, image_ids=None):
         # Load image
         counter += 1
         image = dataset.load_image_from_path(image_id)
-        bbox, _ = dataset.load_bbox(image_id)
+        bboxes, _ = dataset.load_bboxes(image_id)
         related_num = dataset.load_related_num(image_id)
         print('Processing image {}'.format(i))
         # Run detection
         t = time.time()
-        r = model.detect([image], verbose=0, given_rois=[[bbox]])[0]
+        r = model.detect([image], verbose=0, given_rois=[bboxes])[0]
         t_prediction += (time.time() - t)
 
         # Convert results to COCO format
@@ -725,6 +580,77 @@ def retrival_cloth(config, model, dataset, limit=0, image_ids=None):
         t_prediction, t_prediction / len(image_ids)))
     print("Total time: ", time.time() - t_start)
 
+def true_evaluate_task(config, model, dataset, image_ids=None):
+    """Runs official COCO evaluation.
+    dataset: A Dataset object with valiadtion data
+    eval_type: "bbox" or "segm" for bounding box or segmentation evaluation
+    limit: if not 0, it's the number of images to use for evaluation
+    """
+
+    # Pick COCO images from the dataset
+    image_ids = image_ids or dataset.image_ids
+
+    # Limit to a subset
+    image_ids = image_ids[:config.EVA_LIMIT]
+
+    # Get corresponding COCO image IDs.
+    coco_image_ids = [dataset.image_info[id]["id"] for id in image_ids]
+    
+    image_ = dataset.load_image_from_path(image_ids[0])
+    print('Try testing predict one image......')
+    r_ = model.detect([image_], verbose=0)
+    r_ = r_
+    print('Predicted one image.')
+
+    t_prediction = 0
+    t_start = time.time()
+    t0 = time.time()
+    counter = 0
+    results = []
+    kpi = {'maps':[], 'precisions':[], 'recalls':[]}
+    if os.path.exists(os.path.join(config.save_base_dir, 'results_tab.csv')):
+        os.remove(os.path.join(config.save_base_dir, 'results_tab.csv'))
+    for i, image_id in enumerate(image_ids):
+        counter += 1
+        
+        # Load image
+        image = dataset.load_image_from_path(image_id)
+        print('Processing image {}'.format(i))
+        # Run detection
+        t = time.time()
+        r = model.detect([image], verbose=0)[0]
+        t_prediction += (time.time() - t)
+
+        # Cast masks to uint8 because COCO tools errors out on bool
+        for j in range(len(r["class_ids"])):
+            r["class_ids"][j] = 1
+        image_results = build_cloth_evaluate_results(dataset, 
+                                                     [coco_image_ids[i]],
+                                                     r["rois"], 
+                                                       r["class_ids"],
+                                                       r["scores"],
+                                                       r["rmac"],
+                                                       r['feats'])
+        save_one_evaluate_result(config, image_id, dataset, image_results)
+        results.extend(image_results)
+        step = 1000
+        if counter%step == 0:
+            t1 = time.time()
+            rest_time = (t1-t0)*(len(image_ids)-counter)/step
+            print('processing image:{}  rest time(sec)={}'.format(counter, rest_time))
+            t0 = time.time()
+
+    
+
+
+
+    print("Prediction time: {}. Average {}/image".format(
+        t_prediction, t_prediction / len(image_ids)))
+    print("Total time: ", time.time() - t_start)
+                
+
+
+
 
 ############################################################
 #  Training
@@ -733,78 +659,41 @@ def retrival_cloth(config, model, dataset, limit=0, image_ids=None):
 
 if __name__ == '__main__':
     
-    config = ClothConfig()
+    config = ThisConfig.ThisConfig()
     config.display()
     print("Command: ", config.Mode)
-    print("Model: ", config.MODEL_PATH)
-    print("Dataset: ", config.DEFAULT_DATASET)
-    print("Logs: ", config.DEFAULT_LOGS_DIR)
-
-
-    
-    if config.computer == '426':
-        COCO_WEIGHTS_PATH = '/raid/Guests/DaYea/clothes/mask_rcnn_coco.h5'
-        IMG_DIR = '/raid/Guests/Jay/Jay/datasets/clothes/Img'
-        annotations_path = os.path.join("/raid/Guests/zy/clothes/Anno/cloth_all.csv")
-        class_path =  os.path.join("/raid/Guests/zy/clothes/Anno/list_class.csv")
-        img_path = '/raid/Guests/zy/clothes/Anno/cloth.h5'
-        mask_path = r'/raid/Guests/zy/clothes/Anno/mask.h5'
-        
-    elif config.computer == 'jz':
-        COCO_WEIGHTS_PATH = '/hdisk/Ubuntu/backup/aWS/obj-detection/Mask_RCNN-master/model/mask_rcnn_coco.h5'
-        IMG_DIR = r"/hdisk/Ubuntu/datasets/clothes/Img"
-        annotations_path = r"/hdisk/Ubuntu/datasets/clothes/Anno/cloth_all.csv"
-        class_path =  r"/hdisk/Ubuntu/datasets/clothes/Anno/list_class.csv"
-        img_path = r"/hdisk/Ubuntu/datasets/clothes/Anno/cloth.h5"
-        mask_path = r"/hdisk/Ubuntu/datasets/clothes/Anno/mask.h5"
-        query_file = '/home/aaron/mydisk/datasets/from_zy/MVC/query_image'
-        
-    elif config.computer == 'zy':
-        data_root = '/media/mosay/数据/jz/dataset'
-    #    IMG_DIR = os.path.join(ROOT_DIR, "clothes/Img/")
-        COCO_WEIGHTS_PATH = 'mask_rcnn_coco.h5'
-        IMG_DIR =  data_root + '/Img'
-        annotations_path = data_root + "/Anno/cloth_all.csv"
-        class_path =   data_root + "/Anno/list_class.csv"
-        img_path =  data_root + "/Anno/cloth.h5"
-        mask_path =  data_root + "/Anno/mask.h5"
-        query_file = data_root + '/MVC/query_image'
-    # Configurations
 
 
     # Create model
-    if config.Mode == "evaluate":
-        model = modellib.MaskRCNN(mode="inference", config=config,
-                                  model_dir=config.DEFAULT_LOGS_DIR)
     if config.Mode == "retrival":
         model = modellib.MaskRCNN(mode="retrival", config=config,
                                   model_dir=config.DEFAULT_LOGS_DIR)
-    
+    elif config.Mode == "evaluate":
+        model = modellib.MaskRCNN(mode="inference", config=config,
+                                  model_dir=config.DEFAULT_LOGS_DIR)
+    else:
+        print("'{}' is not recognized. "
+              "Use 'train' or 'evaluate'".format(config.Mode))
 
     # Load weights
-    print("Loading weights ", config.MODEL_PATH)
-    model.load_weights(config.MODEL_PATH, by_name=True)
-#    mode = None
-    # Train or evaluate    elif args.command == "evaluate":
+    if config.init_with == "this":
+        model.load_weights(config.THIS_WEIGHT_PATH, by_name=True)
+    elif config.init_with == "coco":
+        model.load_weights(config.COCO_WEIGHTS_PATH, by_name=True)
+    elif config.init_with == "last":
+    # Load the last model you trained and continue training
+        model.load_weights(model.find_last(), by_name=True)
+
+ # Validation dataset
+    dataset_test = ThisConfig.ThisDataset()
+    dataset_test.load_retrival_data(config)
+    dataset_test.prepare()
 
     if config.Mode == "evaluate":
-        # Validation dataset
-        dataset_val = ClothDataset()
-        dataset_val.load_cloth(config, config.DEFAULT_DATASET, query_file, annotations_path, class_path, img_path)        
-        dataset_val.prepare()
-
-
-        print("Running Cloth evaluation on {} images.".format(config.limit))
-        evaluate_cloth(config, model, dataset_val, limit=int(config.limit))
-        
+        true_evaluate_task(config, model, dataset_test)
     elif config.Mode == "retrival":
-        # Validation dataset
-        dataset_val = ClothDataset()
-        dataset_val.load_cloth(config, config.DEFAULT_DATASET, query_file, annotations_path, class_path, img_path)
-        dataset_val.prepare()
-        print("Running Cloth evaluation on {} images.".format(config.limit))
-        retrival_cloth(config, model, dataset_val, limit=int(config.limit))
-        
+        print("Running Cloth evaluation on {} images.".format(config.EVA_LIMIT))
+        evaluate_task(config, model, dataset_test)
     else:
         print("'{}' is not recognized. "
               "Use 'train' or 'evaluate'".format(config.Mode))

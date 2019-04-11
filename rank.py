@@ -12,12 +12,16 @@ import pickle
 import numpy as np
 from sklearn.metrics.pairwise import pairwise_distances
 from PIL import Image, ImageDraw
-
-def check_dir(path):
-    if not os.path.exists(path):
-        os.mkdir(path)
+import ThisConfig
+from tools import check_path
 
 
+
+def get_query_basename(file_path):
+    base_name = os.path.basename(file_path)
+    base_name = base_name.split('.')[0]
+    base_name = base_name[:-len(base_name.split('_')[-1])]
+    return base_name 
 
 def read_feats_db(feats_db_path):
     
@@ -189,9 +193,9 @@ class Ranker():
 
         # Where to store the rankings
         self.rankings_dir = base+ '/rank_'+mark
-        check_dir(self.rankings_dir)
+        check_path(self.rankings_dir)
         self.rerankings_dir = base+ '/rerank_'+mark
-        check_dir(self.rerankings_dir)
+        check_path(self.rerankings_dir)
     def load_db_feats(self):
         
         self.db_feats = read_feats_db(self.feats_db_path)
@@ -211,7 +215,7 @@ class Ranker():
     def write_rankings(self, final_scores):
 
         save_rank_path = os.path.join(self.rankings_dir, 'rank_order')
-        check_dir(save_rank_path)
+        check_path(save_rank_path)
         
         for i, query_info in enumerate(self.query_db['query_feats']):
 
@@ -243,7 +247,7 @@ class Ranker():
         
     def save_rank_result(self):
         save_image_path = os.path.join(self.rankings_dir, 'result_images')
-        check_dir(save_image_path)
+        check_path(save_image_path)
         
         save_rank_path = os.path.join(self.rankings_dir, 'rank_order')
         rank_files = os.listdir(save_rank_path)
@@ -279,7 +283,7 @@ class Ranker():
 
     def save_rank_kpi2(self):
         save_kpi_path = os.path.join(self.rankings_dir, 'result_kpi')
-        check_dir(save_kpi_path)
+        check_path(save_kpi_path)
         save_rank_path = os.path.join(self.rankings_dir, 'rank_order')
         rank_files = os.listdir(save_rank_path)
         
@@ -296,9 +300,8 @@ class Ranker():
                 #def mergeImages(name, files, box, size=(224,224), axis=0):
                 files = []
                 query_full_path = self.query_db['paths'][i]
-                query_base_name = os.path.basename(query_full_path)
-                query_base_name = query_base_name.split('.')[0]
-                query_base_name = query_base_name[:-len(query_base_name.split('_')[-1])]
+                
+                query_base_name = get_query_basename(query_full_path)
                 
                 files.append(query_full_path)
                 
@@ -307,9 +310,7 @@ class Ranker():
                 for i, order in enumerate(ranks[:self.top_k]):
                     
                     image_full_path = order.strip().split(' ')[1]
-                    image_base_name = os.path.basename(image_full_path)
-                    image_base_name = image_base_name.split('.')[0]
-                    image_base_name = image_base_name[:-len(image_base_name.split('_')[-1])]
+                    image_base_name = get_query_basename(image_full_path)
                     
                     if image_base_name == query_base_name:
                         right_num_total += 1
@@ -318,7 +319,7 @@ class Ranker():
             try:
                 recall = right_num_total*1.0/releated_num_total
                 precise = right_num_total*1.0/(right_num_total + wrong_num_total)
-            except ZeroDivisionError as e:
+            except ZeroDivisionError:
                 print('--illeage value display_N')
             print('--top_k = : ', self.top_k)
             print('---- rank recall : ', recall)
@@ -329,12 +330,11 @@ class Ranker():
             f.writelines('-------------------------''\n')
             f.writelines('-------------------------''\n')
                 
-            
         return 
 
     def save_rank_kpi(self):
         save_kpi_path = os.path.join(self.rankings_dir, 'result_kpi')
-        check_dir(save_kpi_path)
+        check_path(save_kpi_path)
         save_rank_path = os.path.join(self.rankings_dir, 'rank_order')
         rank_files = os.listdir(save_rank_path)
         
@@ -351,9 +351,7 @@ class Ranker():
                 #def mergeImages(name, files, box, size=(224,224), axis=0):
                 files = []
                 query_full_path = self.query_db['paths'][i]
-                query_base_name = os.path.basename(query_full_path)
-                query_base_name = query_base_name.split('.')[0]
-                query_base_name = query_base_name[:-len(query_base_name.split('_')[-1])]
+                query_base_name = get_query_basename(query_full_path)
                 
                 files.append(query_full_path)
                 
@@ -362,9 +360,7 @@ class Ranker():
                 for i, order in enumerate(ranks[: self.top_k]):
                     
                     image_full_path = order.strip().split(' ')[1]
-                    image_base_name = os.path.basename(image_full_path)
-                    image_base_name = image_base_name.split('.')[0]
-                    image_base_name = image_base_name[:-len(image_base_name.split('_')[-1])]
+                    image_base_name = get_query_basename(image_full_path)
                     
                     if image_base_name == query_base_name:
                         right_num_total += 1
@@ -373,7 +369,7 @@ class Ranker():
             try:
                 recall = right_num_total*1.0/releated_num_total
                 precise = right_num_total*1.0/(right_num_total + wrong_num_total)
-            except ZeroDivisionError as e:
+            except ZeroDivisionError:
                 print('--illeage value top_k')
             print('--top_k = : ', self.top_k)
             print('---- rank recall : ', recall)
@@ -396,7 +392,6 @@ class Ranker():
         for line in ranks:
             temp = line.strip().split(' ')
             result.append([int(temp[0][:-1]), temp[1]])
-        
         
         return result
         
@@ -443,7 +438,7 @@ class Ranker():
         
         
         rerankings_dir_info = os.path.join(self.rerankings_dir, 'rerank_order')
-        check_dir(rerankings_dir_info)
+        check_path(rerankings_dir_info)
         with open(os.path.join(rerankings_dir_info, str(query_idx)) + '.pkl' ,'wb') as f:
             pickle.dump(best_distances, f)
             pickle.dump(best_boxes, f)
@@ -470,37 +465,69 @@ class Ranker():
         '''
         
         save_image_path = os.path.join(self.rerankings_dir, 'result_images')
-        check_dir(save_image_path)
+        check_path(save_image_path)
         
         rerankings_dir_info = os.path.join(self.rerankings_dir, 'rerank_order')
-        
         rerank_files = sorted(os.listdir(rerankings_dir_info))
         
-        for i in range(len(rerank_files)):
-            with open(os.path.join(rerankings_dir_info, str(i)+'.pkl') ,'rb') as f: 
-                best_distances = pickle.load(f)
-                best_boxes = pickle.load(f)
-                best_frames = pickle.load(f)
-            
-
-            
-            #def mergeImages(name, files, box, size=(224,224), axis=0):
-            files = []
-            files.append(self.query_db['paths'][i])
-            bboxes = []
-            box = self.query_db['query_boxes'][i]
-            bboxes.append(box)
-            name = os.path.join(save_image_path, 'result_'+str(i)+'.jpg')
-            
-            for i, frame in enumerate(best_frames):
-                if i == self.top_k:
-                    break
-                files.append(frame)
-                bboxes.append(best_boxes[i])
-            
-            mergeImages2(name, files, bboxes, size=(128,128), axis=1)
+        save_kpi_path = os.path.join(self.rerankings_dir, 'result_kpi')
+        check_path(save_kpi_path)
+        
+        with open(os.path.join(save_kpi_path, 'rerank_kpi.txt'), 'a+') as kpi_f:
+            releated_num_total = 0
+            right_num_total = 0
+            wrong_num_total = 0
+            recall = 0
+            precise = 0
             
             
+            
+            for i in range(len(rerank_files)):
+                with open(os.path.join(rerankings_dir_info, str(i)+'.pkl') ,'rb') as f: 
+                    best_distances = pickle.load(f)
+                    best_boxes = pickle.load(f)
+                    best_frames = pickle.load(f)
+                
+                #def mergeImages(name, files, box, size=(224,224), axis=0):
+                files = []
+                files.append(self.query_db['paths'][i])
+                
+                query_base_name = get_query_basename(self.query_db['paths'][i])
+                related_num = self.query_db['related_num'][i]
+                releated_num_total += related_num
+                
+                bboxes = []
+                box = self.query_db['query_boxes'][i]
+                bboxes.append(box)
+                name = os.path.join(save_image_path, 'result_'+str(i)+'.jpg')
+                
+                for i, frame in enumerate(best_frames):
+                    if i == self.top_k:
+                        break
+                    files.append(frame)
+                    bboxes.append(best_boxes[i])
+                    image_base_name = get_query_basename(frame)
+                    if image_base_name == query_base_name:
+                        right_num_total += 1
+                    else:
+                        wrong_num_total += 1
+                
+                mergeImages2(name, files, bboxes, size=(128,128), axis=1)
+                
+            try:
+                recall = right_num_total*1.0/releated_num_total
+                precise = right_num_total*1.0/(right_num_total + wrong_num_total)
+            except ZeroDivisionError:
+                print('--illeage value top_k')
+                
+            print('--top_k = : ', self.top_k)
+            print('---- rank recall : ', recall)
+            print('---- rank precise: ', precise)
+            kpi_f.writelines('top_k = : '+str(self.top_k)+'\n')
+            kpi_f.writelines('recall:  '+str(recall)[:6]+'\n')
+            kpi_f.writelines('precise: '+str(precise)[:6]+'\n')
+            kpi_f.writelines('-------------------------''\n')
+            kpi_f.writelines('-------------------------''\n')
         name_list = []
         name_all = os.path.join(save_image_path, 'all.jpg')
         for i in range(len(rerank_files)):
@@ -518,20 +545,17 @@ class Ranker():
 
                 
 if __name__=='__main__':
-    
-    mark = 'subset'  #'subset' 'miniset'
-    base = 'clothes'
-    version = '0742'
-    ranker = Ranker(mark,'rmac_based_'+ base+'_'+version)
+    config = ThisConfig.ThisConfig()
+    ranker = Ranker(config.subset,config.save_base_dir)
     
     ranker.load_db_feats()
     ranker.rank()
     
     ranker.save_rank_kpi2()
-#    ranker.save_rank_result()
+    ranker.save_rank_result()
 #    
-#    ranker.rerank()
-#    ranker.save_rerank_result()
+    ranker.rerank()
+    ranker.save_rerank_result()
     
 
 
